@@ -559,6 +559,46 @@
       80%{transform:translateX(5px)}
     }
   </style>
+
+  <!-- FIREBASE SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyA69JUi-GfgoZU-XhEP6TEoELxY-QinSvw",
+      authDomain: "controle-acesso-ms.firebaseapp.com",
+      projectId: "controle-acesso-ms",
+      storageBucket: "controle-acesso-ms.firebasestorage.app",
+      messagingSenderId: "140293306807",
+      appId: "1:140293306807:web:56c6975175bb3788e31032"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getFirestore(app);
+    const col = collection(db, 'registros');
+
+    window._fb = {
+      async salvar(reg) {
+        const docRef = await addDoc(col, reg);
+        return docRef.id;
+      },
+      async deletar(fbId) {
+        await deleteDoc(doc(db, 'registros', fbId));
+      },
+      escutar(callback) {
+        const q = query(col, orderBy('timestamp', 'asc'));
+        return onSnapshot(q, snap => {
+          const docs = [];
+          snap.forEach(d => docs.push({ ...d.data(), _fbId: d.id }));
+          callback(docs);
+        });
+      }
+    };
+
+    window._fbPronto = true;
+    window.dispatchEvent(new Event('firebase-pronto'));
+  </script>
 </head>
 <body>
 
@@ -1159,10 +1199,27 @@ function switchTab(tabId, btn) {
   btn.classList.add('active');
 }
 
-// Banco de registros em memória
+// ═══════════════════════════════════════════════════
+// FIREBASE — banco de dados em nuvem
+// ═══════════════════════════════════════════════════
 let registros = [];
 
-function submitForm(tabId) {
+function iniciarEscutaFirebase() {
+  if (!window._fb) return;
+  window._fb.escutar(docs => {
+    registros = docs;
+    atualizarListaSaidas();
+  });
+}
+
+// Aguarda Firebase estar pronto antes de escutar
+if (window._fbPronto) {
+  iniciarEscutaFirebase();
+} else {
+  window.addEventListener('firebase-pronto', iniciarEscutaFirebase);
+}
+
+async function submitForm(tabId) {
   const panel = document.getElementById(tabId);
   const fields = panel.querySelectorAll('[required]');
   let valid = true;
@@ -1179,7 +1236,6 @@ function submitForm(tabId) {
   });
   if (!valid) return;
 
-  // Captura dados
   const tipo = tabId.replace('tab-','');
   const dataEl = document.getElementById('data-' + tipo.charAt(0));
   const horaEl = document.getElementById('hora-' + tipo.charAt(0));
@@ -1191,16 +1247,12 @@ function submitForm(tabId) {
     porteiro: porteiro,
     timestamp: new Date().toISOString()
   };
-  // Captura todos os inputs/selects do painel
   panel.querySelectorAll('input:not([type=radio]), select, textarea').forEach((el, i) => {
-    if(true){
-      reg['campo_' + i] = el.value;
-    }
+    reg['campo_' + i] = el.value;
   });
   panel.querySelectorAll('input[type=radio]:checked').forEach(r => {
     reg[r.name] = r.value;
   });
-  // Captura nome para saída (primeiro campo de texto preenchido)
   let nomeCapturado = '—';
   panel.querySelectorAll('input[type=text]').forEach(el => {
     if (nomeCapturado === '—' && el.value.trim()) nomeCapturado = el.value.trim();
@@ -1211,17 +1263,20 @@ function submitForm(tabId) {
   }
   reg.nomeExibicao = nomeCapturado;
 
-  // Verifica se é entrada para adicionar à lista de saídas
   const radioChecked = panel.querySelector('input[type=radio]:checked');
   const movimentacao = radioChecked ? radioChecked.value : '';
   reg.movimentacao = movimentacao;
 
   if (movimentacao === 'entrada' || movimentacao === 'prestador' || movimentacao === '') {
     reg.id = Date.now();
-    registros.push(reg);
-    atualizarListaSaidas();
+  }
+
+  // Salva no Firebase (ou fallback local)
+  if (window._fb) {
+    await window._fb.salvar(reg);
   } else {
     registros.push(reg);
+    atualizarListaSaidas();
   }
 
   const toast = document.getElementById('toast');
@@ -1266,7 +1321,7 @@ function atualizarListaSaidas() {
   });
 }
 
-function registrarSaida(id) {
+async function registrarSaida(id) {
   const idx = registros.findIndex(r => r.id === id);
   if (idx === -1) return;
   const original = registros[idx];
@@ -1277,8 +1332,6 @@ function registrarSaida(id) {
 
   const regSaida = {
     ...original,
-    id: Date.now(),
-    tipo: original.tipo,
     movimentacao: 'saida',
     data: `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`,
     hora: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
@@ -1286,14 +1339,18 @@ function registrarSaida(id) {
     timestamp: now.toISOString(),
     'acesso-v': 'saida', 'acesso-f': 'saida', 'acesso-p': 'saida'
   };
-
-  // Remove original da lista de entradas pendentes
-  registros.splice(idx, 1);
-  // Adiciona o registro de saída (sem id para não aparecer novamente)
   delete regSaida.id;
-  registros.push(regSaida);
+  delete regSaida._fbId;
 
-  atualizarListaSaidas();
+  if (window._fb) {
+    // Salva saída e remove entrada do Firebase
+    await window._fb.salvar(regSaida);
+    if (original._fbId) await window._fb.deletar(original._fbId);
+  } else {
+    registros.splice(idx, 1);
+    registros.push(regSaida);
+    atualizarListaSaidas();
+  }
 
   const toast = document.getElementById('toast');
   toast.className = 'toast toast-saida show';
